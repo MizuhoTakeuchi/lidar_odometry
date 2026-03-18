@@ -119,6 +119,8 @@ private:
     std::string lidar_frame_;
     std::string odom_frame_;
     bool publish_tf_;
+    Eigen::Affine3f T_lidar_to_vehicle_;
+    std::string vehicle_frame_;
 
     // --- ROS interfaces ---
     rclcpp::Subscription<sensor_msgs::msg::PointCloud2>::SharedPtr sub_cloud_;

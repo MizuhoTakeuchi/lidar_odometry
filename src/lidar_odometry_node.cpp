@@ -93,6 +93,14 @@ LidarOdometryNode::LidarOdometryNode(const rclcpp::NodeOptions& options)
                 (sensor_type_ == SensorType::OUSTER ? "ouster" :
                  sensor_type_ == SensorType::VELODYNE ? "velodyne" : "livox"),
                 n_scan_, horizon_scan_);
+
+    {
+        float ex, ey, ez, eroll, epitch, eyaw;
+        pcl::getTranslationAndEulerAngles(T_lidar_to_vehicle_, ex, ey, ez, eroll, epitch, eyaw);
+        RCLCPP_INFO(get_logger(),
+                    "Extrinsic LiDAR->Vehicle: t=[%.3f, %.3f, %.3f] rpy=[%.3f, %.3f, %.3f] vehicle_frame=%s",
+                    ex, ey, ez, eroll, epitch, eyaw, vehicle_frame_.c_str());
+    }
 }
 
 // ============================================================
@@ -133,6 +141,20 @@ void LidarOdometryNode::declareParameters()
     declare_parameter("lidar_frame", "lidar_link"); get_parameter("lidar_frame", lidar_frame_);
     declare_parameter("odom_frame", "odom");   get_parameter("odom_frame", odom_frame_);
     declare_parameter("publish_tf", true);     get_parameter("publish_tf", publish_tf_);
+
+    // Extrinsic calibration: LiDAR → Vehicle
+    declare_parameter("lidar_to_vehicle_translation", std::vector<double>{0.0, 0.0, 0.0});
+    declare_parameter("lidar_to_vehicle_rotation", std::vector<double>{0.0, 0.0, 0.0});
+    declare_parameter("vehicle_frame", "base_link");
+
+    std::vector<double> ext_trans, ext_rot;
+    get_parameter("lidar_to_vehicle_translation", ext_trans);
+    get_parameter("lidar_to_vehicle_rotation", ext_rot);
+    get_parameter("vehicle_frame", vehicle_frame_);
+
+    T_lidar_to_vehicle_ = pcl::getTransformation(
+        ext_trans[0], ext_trans[1], ext_trans[2],
+        ext_rot[0], ext_rot[1], ext_rot[2]);
 }
 
 // ============================================================
@@ -210,6 +232,10 @@ void LidarOdometryNode::cloudCallback(const sensor_msgs::msg::PointCloud2::Share
 
     // (4) Extract features
     extractFeatures();
+
+    // (4.5) Transform features from LiDAR frame to vehicle frame
+    corner_cloud_ = transformPointCloud(corner_cloud_, T_lidar_to_vehicle_);
+    surface_cloud_ = transformPointCloud(surface_cloud_, T_lidar_to_vehicle_);
 
     // (5) Compute initial guess
     computeInitialGuess();
@@ -1119,7 +1145,7 @@ void LidarOdometryNode::publishResults()
     nav_msgs::msg::Odometry odom_msg;
     odom_msg.header.stamp = current_cloud_stamp_;
     odom_msg.header.frame_id = odom_frame_;
-    odom_msg.child_frame_id = lidar_frame_;
+    odom_msg.child_frame_id = vehicle_frame_;
 
     odom_msg.pose.pose.position.x = transform_to_be_mapped_[3];
     odom_msg.pose.pose.position.y = transform_to_be_mapped_[4];
@@ -1143,7 +1169,7 @@ void LidarOdometryNode::publishResults()
         geometry_msgs::msg::TransformStamped tf_msg;
         tf_msg.header.stamp = current_cloud_stamp_;
         tf_msg.header.frame_id = odom_frame_;
-        tf_msg.child_frame_id = lidar_frame_;
+        tf_msg.child_frame_id = vehicle_frame_;
         tf_msg.transform.translation.x = transform_to_be_mapped_[3];
         tf_msg.transform.translation.y = transform_to_be_mapped_[4];
         tf_msg.transform.translation.z = transform_to_be_mapped_[5];

@@ -35,3 +35,8 @@ lidar_odometry_node:
     lidar_frame: "lidar_link"
     odom_frame: "odom"
     publish_tf: true
+
+    # Extrinsic calibration: LiDAR → Vehicle
+    lidar_to_vehicle_translation: [0.0, 0.0, 0.0]  # [x, y, z] in meters
+    lidar_to_vehicle_rotation: [0.0, 0.0, 0.0]      # [roll, pitch, yaw] in radians
+    vehicle_frame: "base_link"
