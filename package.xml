@@ -3,33 +3,22 @@
 <package format="3">
   <name>lidar_odometry</name>
   <version>0.1.0</version>
-  <description>Standalone LiDAR odometry node with scan-to-map matching and covariance estimation</description>
-
+  <description>LiDAR odometry using NDT scan matching</description>
   <maintainer email="mtake@example.com">mtake</maintainer>
-  <license>BSD-3-Clause</license>
+  <license>Apache-2.0</license>
 
   <buildtool_depend>ament_cmake</buildtool_depend>
 
   <depend>rclcpp</depend>
   <depend>sensor_msgs</depend>
   <depend>geometry_msgs</depend>
-  <depend>nav_msgs</depend>
   <depend>tf2</depend>
   <depend>tf2_ros</depend>
-  <depend>tf2_eigen</depend>
   <depend>tf2_geometry_msgs</depend>
   <depend>pcl_conversions</depend>
 
-  <build_depend>libopencv-dev</build_depend>
+  <build_depend>ndt_omp_ros2</build_depend>
   <build_depend>libpcl-all-dev</build_depend>
-  <build_depend>eigen</build_depend>
-
-  <exec_depend>libopencv-dev</exec_depend>
-  <exec_depend>libpcl-all-dev</exec_depend>
-  <exec_depend>eigen</exec_depend>
-
-  <test_depend>ament_lint_auto</test_depend>
-  <test_depend>ament_lint_common</test_depend>
 
   <export>
     <build_type>ament_cmake</build_type>

@@ -1,42 +1,25 @@
-lidar_odometry_node:
+lidar_odometry:
   ros__parameters:
-    # Sensor
-    sensor: "ouster"
-    n_scan: 64
-    horizon_scan: 512
-    downsample_rate: 1
-    lidar_min_range: 1.0
-    lidar_max_range: 1000.0
+    input_topic: "/velodyne_points"
 
-    # Feature extraction
-    edge_threshold: 1.0
-    surf_threshold: 0.1
-    edge_feature_min_valid_num: 10
-    surf_feature_min_valid_num: 100
+    # NDT parameters
+    ndt_resolution: 2.0
+    ndt_step_size: 0.01
+    ndt_max_iterations: 30
+    ndt_epsilon: 0.01
+    ndt_num_threads: 4
+    ndt_search_method: "DIRECT7"
 
-    # Voxel filter
-    corner_leaf_size: 0.2
-    surf_leaf_size: 0.4
+    # Point cloud filtering
+    voxel_leaf_size: 0.25
+    min_scan_range: 1.0
+    max_scan_range: 100.0
 
-    # Optimization
-    max_iterations: 30
-    degeneracy_threshold: 100.0
-    degeneracy_covariance: 1.0e+4
+    # Frame IDs
+    odom_frame_id: "odom"
+    base_frame_id: "base_link"
 
-    # Keyframe
-    keyframe_dist_threshold: 1.0
-    keyframe_angle_threshold: 0.2
-    max_local_map_keyframes: 50
-
-    # CPU
-    num_threads: 4
-
-    # Frames
-    lidar_frame: "lidar_link"
-    odom_frame: "odom"
-    publish_tf: true
-
-    # Extrinsic calibration: LiDAR → Vehicle
-    lidar_to_vehicle_translation: [0.0, 0.0, 0.0]  # [x, y, z] in meters
-    lidar_to_vehicle_rotation: [0.0, 0.0, 0.0]      # [roll, pitch, yaw] in radians
-    vehicle_frame: "base_link"
+    # Covariance estimation
+    base_translation_variance: 0.01
+    base_rotation_variance: 0.001
+    score_scale_factor: 1.0
