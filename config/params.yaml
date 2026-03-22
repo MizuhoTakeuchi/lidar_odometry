@@ -19,6 +19,14 @@ lidar_odometry:
     odom_frame_id: "odom"
     base_frame_id: "base_link"
 
+    # LiDAR to vehicle extrinsic calibration [m, rad]
+    lidar_to_vehicle_x: 0.0
+    lidar_to_vehicle_y: 0.0
+    lidar_to_vehicle_z: 0.0
+    lidar_to_vehicle_roll: 0.0
+    lidar_to_vehicle_pitch: 0.0
+    lidar_to_vehicle_yaw: 0.0
+
     # Covariance estimation
     base_translation_variance: 0.01
     base_rotation_variance: 0.001

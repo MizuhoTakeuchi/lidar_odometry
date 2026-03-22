@@ -33,6 +33,23 @@ LidarOdometryNode::LidarOdometryNode(const rclcpp::NodeOptions & options)
   base_rotation_variance_ = this->declare_parameter<double>("base_rotation_variance", 0.001);
   score_scale_factor_ = this->declare_parameter<double>("score_scale_factor", 1.0);
 
+  // LiDAR to vehicle extrinsic calibration
+  auto l2v_x = this->declare_parameter<double>("lidar_to_vehicle_x", 0.0);
+  auto l2v_y = this->declare_parameter<double>("lidar_to_vehicle_y", 0.0);
+  auto l2v_z = this->declare_parameter<double>("lidar_to_vehicle_z", 0.0);
+  auto l2v_roll = this->declare_parameter<double>("lidar_to_vehicle_roll", 0.0);
+  auto l2v_pitch = this->declare_parameter<double>("lidar_to_vehicle_pitch", 0.0);
+  auto l2v_yaw = this->declare_parameter<double>("lidar_to_vehicle_yaw", 0.0);
+
+  // Build LiDAR→vehicle transform matrix
+  Eigen::Translation3f translation(
+    static_cast<float>(l2v_x), static_cast<float>(l2v_y), static_cast<float>(l2v_z));
+  Eigen::AngleAxisf roll_angle(static_cast<float>(l2v_roll), Eigen::Vector3f::UnitX());
+  Eigen::AngleAxisf pitch_angle(static_cast<float>(l2v_pitch), Eigen::Vector3f::UnitY());
+  Eigen::AngleAxisf yaw_angle(static_cast<float>(l2v_yaw), Eigen::Vector3f::UnitZ());
+  t_vehicle_lidar_ = (translation * yaw_angle * pitch_angle * roll_angle).matrix();
+  t_lidar_vehicle_ = t_vehicle_lidar_.inverse();
+
   // Configure NDT
   ndt_.setResolution(static_cast<float>(ndt_resolution));
   ndt_.setStepSize(ndt_step_size);
@@ -71,6 +88,9 @@ LidarOdometryNode::LidarOdometryNode(const rclcpp::NodeOptions & options)
   RCLCPP_INFO(this->get_logger(), "  Input topic: %s", input_topic.c_str());
   RCLCPP_INFO(this->get_logger(), "  NDT resolution: %.2f, threads: %ld, method: %s",
     ndt_resolution, ndt_num_threads, ndt_search_method.c_str());
+  RCLCPP_INFO(this->get_logger(),
+    "  LiDAR to vehicle: xyz=(%.3f, %.3f, %.3f), rpy=(%.3f, %.3f, %.3f)",
+    l2v_x, l2v_y, l2v_z, l2v_roll, l2v_pitch, l2v_yaw);
 }
 
 void LidarOdometryNode::pointCloudCallback(
@@ -93,13 +113,14 @@ void LidarOdometryNode::pointCloudCallback(
     return;
   }
 
-  // First frame: store and publish identity
+  // First frame: store and publish identity (in vehicle frame)
   if (is_first_frame_) {
     prev_cloud_ = filtered_cloud;
     is_first_frame_ = false;
 
     std::array<double, 36> zero_cov{};
-    auto odom_msg = matrix4fToPoseMsg(cumulative_pose_, msg->header, zero_cov);
+    Eigen::Matrix4f cumulative_vehicle = t_vehicle_lidar_ * cumulative_pose_ * t_lidar_vehicle_;
+    auto odom_msg = matrix4fToPoseMsg(cumulative_vehicle, msg->header, zero_cov);
     auto trans_msg = matrix4fToPoseMsg(Eigen::Matrix4f::Identity(), msg->header, zero_cov);
 
     odom_pub_->publish(odom_msg);
@@ -132,12 +153,16 @@ void LidarOdometryNode::pointCloudCallback(
   // Estimate covariance
   auto covariance = estimateCovariance();
 
-  // Publish
-  auto odom_msg = matrix4fToPoseMsg(cumulative_pose_, msg->header, covariance);
+  // Transform to vehicle frame (conjugation: T_v_l * T * T_v_l^-1)
+  Eigen::Matrix4f cumulative_vehicle = t_vehicle_lidar_ * cumulative_pose_ * t_lidar_vehicle_;
+  Eigen::Matrix4f delta_vehicle = t_vehicle_lidar_ * delta * t_lidar_vehicle_;
+
+  // Publish in vehicle frame
+  auto odom_msg = matrix4fToPoseMsg(cumulative_vehicle, msg->header, covariance);
   odom_msg.header.frame_id = odom_frame_id_;
   odom_pub_->publish(odom_msg);
 
-  auto trans_msg = matrix4fToPoseMsg(delta, msg->header, covariance);
+  auto trans_msg = matrix4fToPoseMsg(delta_vehicle, msg->header, covariance);
   trans_pub_->publish(trans_msg);
 
   RCLCPP_DEBUG(this->get_logger(),

@@ -55,6 +55,10 @@ private:
   rclcpp::Publisher<geometry_msgs::msg::PoseWithCovarianceStamped>::SharedPtr odom_pub_;
   rclcpp::Publisher<geometry_msgs::msg::PoseWithCovarianceStamped>::SharedPtr trans_pub_;
 
+  // LiDAR to vehicle extrinsic transform
+  Eigen::Matrix4f t_vehicle_lidar_;
+  Eigen::Matrix4f t_lidar_vehicle_;
+
   // Parameters
   double min_scan_range_;
   double max_scan_range_;
