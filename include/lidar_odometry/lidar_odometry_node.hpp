@@ -3,17 +3,21 @@
 
 #include <rclcpp/rclcpp.hpp>
 #include <sensor_msgs/msg/point_cloud2.hpp>
+#include <sensor_msgs/msg/imu.hpp>
 #include <geometry_msgs/msg/pose_with_covariance_stamped.hpp>
 
 #include <pcl/point_types.h>
 #include <pcl/point_cloud.h>
 #include <pcl/filters/voxel_grid.h>
+#include <pcl/common/transforms.h>
 #include <pclomp/ndt_omp.h>
 
 #include <Eigen/Core>
 #include <Eigen/Geometry>
 
 #include <array>
+#include <deque>
+#include <mutex>
 
 namespace lidar_odometry
 {
@@ -28,8 +32,11 @@ private:
   using PointCloud = pcl::PointCloud<PointT>;
 
   void pointCloudCallback(const sensor_msgs::msg::PointCloud2::SharedPtr msg);
+  void imuCallback(const sensor_msgs::msg::Imu::SharedPtr msg);
 
   PointCloud::Ptr filterPointCloud(const PointCloud::Ptr & cloud) const;
+  Eigen::Matrix4f predictFromImu(const rclcpp::Time & prev_time, const rclcpp::Time & curr_time);
+  void updateLocalMap(const PointCloud::Ptr & cloud, const Eigen::Matrix4f & pose);
 
   std::array<double, 36> estimateCovariance() const;
 
@@ -49,6 +56,17 @@ private:
   PointCloud::Ptr prev_cloud_;
   Eigen::Matrix4f cumulative_pose_;
   Eigen::Matrix4f prev_delta_;
+  rclcpp::Time prev_stamp_;
+
+  // Local map
+  std::deque<PointCloud::Ptr> local_map_frames_;
+  PointCloud::Ptr local_map_;
+  Eigen::Matrix4f last_keyframe_pose_;
+
+  // IMU
+  rclcpp::Subscription<sensor_msgs::msg::Imu>::SharedPtr imu_sub_;
+  std::deque<sensor_msgs::msg::Imu> imu_buffer_;
+  std::mutex imu_mutex_;
 
   // Publishers / Subscribers
   rclcpp::Subscription<sensor_msgs::msg::PointCloud2>::SharedPtr cloud_sub_;
@@ -69,6 +87,15 @@ private:
   double base_translation_variance_;
   double base_rotation_variance_;
   double score_scale_factor_;
+
+  // Local map parameters
+  int local_map_size_;
+  double local_map_voxel_size_;
+  double local_map_keyframe_distance_;
+  double local_map_keyframe_angle_;
+
+  // IMU parameters
+  bool use_imu_prediction_;
 };
 
 }  // namespace lidar_odometry

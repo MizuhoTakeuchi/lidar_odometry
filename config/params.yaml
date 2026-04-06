@@ -15,6 +15,16 @@ lidar_odometry:
     min_scan_range: 1.0
     max_scan_range: 100.0
 
+    # Local map parameters
+    local_map_size: 15                  # Number of keyframes to keep in local map
+    local_map_voxel_size: 0.5           # Voxel size for local map downsampling [m]
+    local_map_keyframe_distance: 0.5    # Min translation to register new keyframe [m]
+    local_map_keyframe_angle: 0.1       # Min rotation to register new keyframe [rad]
+
+    # IMU fusion
+    imu_topic: "/imu/data"
+    use_imu_prediction: true            # Use IMU for NDT initial guess
+
     # Frame IDs
     odom_frame_id: "odom"
     base_frame_id: "base_link"

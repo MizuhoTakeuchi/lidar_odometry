@@ -6,6 +6,7 @@
 
 #include <algorithm>
 #include <cmath>
+#include <numeric>
 
 namespace lidar_odometry
 {
@@ -14,7 +15,9 @@ LidarOdometryNode::LidarOdometryNode(const rclcpp::NodeOptions & options)
 : Node("lidar_odometry", options),
   is_first_frame_(true),
   cumulative_pose_(Eigen::Matrix4f::Identity()),
-  prev_delta_(Eigen::Matrix4f::Identity())
+  prev_delta_(Eigen::Matrix4f::Identity()),
+  prev_stamp_(0, 0, RCL_ROS_TIME),
+  last_keyframe_pose_(Eigen::Matrix4f::Identity())
 {
   // Declare parameters
   auto input_topic = this->declare_parameter<std::string>("input_topic", "/velodyne_points");
@@ -32,6 +35,18 @@ LidarOdometryNode::LidarOdometryNode(const rclcpp::NodeOptions & options)
   base_translation_variance_ = this->declare_parameter<double>("base_translation_variance", 0.01);
   base_rotation_variance_ = this->declare_parameter<double>("base_rotation_variance", 0.001);
   score_scale_factor_ = this->declare_parameter<double>("score_scale_factor", 1.0);
+
+  // Local map parameters
+  local_map_size_ = this->declare_parameter<int>("local_map_size", 15);
+  local_map_voxel_size_ = this->declare_parameter<double>("local_map_voxel_size", 0.5);
+  local_map_keyframe_distance_ = this->declare_parameter<double>(
+    "local_map_keyframe_distance", 0.5);
+  local_map_keyframe_angle_ = this->declare_parameter<double>(
+    "local_map_keyframe_angle", 0.1);
+
+  // IMU parameters
+  auto imu_topic = this->declare_parameter<std::string>("imu_topic", "/imu/data");
+  use_imu_prediction_ = this->declare_parameter<bool>("use_imu_prediction", true);
 
   // LiDAR to vehicle extrinsic calibration
   auto l2v_x = this->declare_parameter<double>("lidar_to_vehicle_x", 0.0);
@@ -79,18 +94,153 @@ LidarOdometryNode::LidarOdometryNode(const rclcpp::NodeOptions & options)
   trans_pub_ = this->create_publisher<geometry_msgs::msg::PoseWithCovarianceStamped>(
     "/lidar_odometry/trans_pose", 10);
 
-  // Subscriber
+  // Subscribers
   cloud_sub_ = this->create_subscription<sensor_msgs::msg::PointCloud2>(
     input_topic, rclcpp::SensorDataQoS(),
     std::bind(&LidarOdometryNode::pointCloudCallback, this, std::placeholders::_1));
+
+  if (use_imu_prediction_) {
+    imu_sub_ = this->create_subscription<sensor_msgs::msg::Imu>(
+      imu_topic, rclcpp::SensorDataQoS(),
+      std::bind(&LidarOdometryNode::imuCallback, this, std::placeholders::_1));
+  }
 
   RCLCPP_INFO(this->get_logger(), "LiDAR odometry node initialized");
   RCLCPP_INFO(this->get_logger(), "  Input topic: %s", input_topic.c_str());
   RCLCPP_INFO(this->get_logger(), "  NDT resolution: %.2f, threads: %ld, method: %s",
     ndt_resolution, ndt_num_threads, ndt_search_method.c_str());
+  RCLCPP_INFO(this->get_logger(), "  Local map: size=%d, voxel=%.2f, kf_dist=%.2f, kf_angle=%.2f",
+    local_map_size_, local_map_voxel_size_,
+    local_map_keyframe_distance_, local_map_keyframe_angle_);
+  RCLCPP_INFO(this->get_logger(), "  IMU prediction: %s, topic: %s",
+    use_imu_prediction_ ? "enabled" : "disabled", imu_topic.c_str());
   RCLCPP_INFO(this->get_logger(),
     "  LiDAR to vehicle: xyz=(%.3f, %.3f, %.3f), rpy=(%.3f, %.3f, %.3f)",
     l2v_x, l2v_y, l2v_z, l2v_roll, l2v_pitch, l2v_yaw);
+}
+
+void LidarOdometryNode::imuCallback(const sensor_msgs::msg::Imu::SharedPtr msg)
+{
+  std::lock_guard<std::mutex> lock(imu_mutex_);
+  imu_buffer_.push_back(*msg);
+  // Keep buffer bounded to avoid unbounded memory growth
+  while (imu_buffer_.size() > 1000) {
+    imu_buffer_.pop_front();
+  }
+}
+
+Eigen::Matrix4f LidarOdometryNode::predictFromImu(
+  const rclcpp::Time & prev_time, const rclcpp::Time & curr_time)
+{
+  std::lock_guard<std::mutex> lock(imu_mutex_);
+
+  // Rotation matrix: LiDAR ← vehicle (for transforming IMU angular velocity to LiDAR frame)
+  Eigen::Matrix3d r_lidar_vehicle = t_lidar_vehicle_.block<3, 3>(0, 0).cast<double>();
+
+  Eigen::Vector3d integrated_angular(0.0, 0.0, 0.0);
+  rclcpp::Time last_time = prev_time;
+  bool has_data = false;
+
+  for (const auto & imu : imu_buffer_) {
+    rclcpp::Time imu_time(imu.header.stamp);
+    if (imu_time <= prev_time) {
+      continue;
+    }
+    if (imu_time > curr_time) {
+      break;
+    }
+
+    double dt = (imu_time - last_time).seconds();
+    if (dt <= 0.0 || dt > 0.5) {
+      last_time = imu_time;
+      continue;
+    }
+
+    // Transform angular velocity from vehicle/IMU frame to LiDAR frame
+    Eigen::Vector3d omega_vehicle(
+      imu.angular_velocity.x, imu.angular_velocity.y, imu.angular_velocity.z);
+    Eigen::Vector3d omega_lidar = r_lidar_vehicle * omega_vehicle;
+
+    integrated_angular += omega_lidar * dt;
+    last_time = imu_time;
+    has_data = true;
+  }
+
+  // Remove consumed IMU data (keep data from prev_time onward for potential reuse)
+  while (!imu_buffer_.empty()) {
+    rclcpp::Time t(imu_buffer_.front().header.stamp);
+    if (t >= prev_time) {
+      break;
+    }
+    imu_buffer_.pop_front();
+  }
+
+  if (!has_data) {
+    // No IMU data available, fall back to constant velocity
+    return prev_delta_;
+  }
+
+  // Build rotation from integrated angular velocity (small angle: ZYX order)
+  Eigen::AngleAxisd roll(integrated_angular.x(), Eigen::Vector3d::UnitX());
+  Eigen::AngleAxisd pitch(integrated_angular.y(), Eigen::Vector3d::UnitY());
+  Eigen::AngleAxisd yaw(integrated_angular.z(), Eigen::Vector3d::UnitZ());
+  Eigen::Matrix3d rotation = (yaw * pitch * roll).toRotationMatrix();
+
+  // Hybrid prediction: IMU rotation + constant velocity translation
+  Eigen::Matrix4f prediction = Eigen::Matrix4f::Identity();
+  prediction.block<3, 3>(0, 0) = rotation.cast<float>();
+  prediction.block<3, 1>(0, 3) = prev_delta_.block<3, 1>(0, 3);
+
+  return prediction;
+}
+
+void LidarOdometryNode::updateLocalMap(
+  const PointCloud::Ptr & cloud, const Eigen::Matrix4f & pose)
+{
+  // Check if this frame qualifies as a new keyframe
+  Eigen::Matrix4f delta_from_keyframe = last_keyframe_pose_.inverse() * pose;
+  double trans_diff = delta_from_keyframe.block<3, 1>(0, 3).norm();
+  double angle_diff = Eigen::AngleAxisf(
+    Eigen::Matrix3f(delta_from_keyframe.block<3, 3>(0, 0))).angle();
+
+  bool is_first_keyframe = local_map_frames_.empty();
+  if (!is_first_keyframe &&
+      trans_diff < local_map_keyframe_distance_ &&
+      angle_diff < local_map_keyframe_angle_) {
+    return;  // Not enough movement for a new keyframe
+  }
+
+  // Transform cloud to map frame
+  auto transformed = std::make_shared<PointCloud>();
+  pcl::transformPointCloud(*cloud, *transformed, pose);
+
+  local_map_frames_.push_back(transformed);
+  last_keyframe_pose_ = pose;
+
+  // Remove old frames beyond the window
+  while (static_cast<int>(local_map_frames_.size()) > local_map_size_) {
+    local_map_frames_.pop_front();
+  }
+
+  // Rebuild local map by concatenation + downsampling
+  auto combined = std::make_shared<PointCloud>();
+  for (const auto & frame : local_map_frames_) {
+    *combined += *frame;
+  }
+
+  pcl::VoxelGrid<PointT> voxel;
+  voxel.setLeafSize(
+    static_cast<float>(local_map_voxel_size_),
+    static_cast<float>(local_map_voxel_size_),
+    static_cast<float>(local_map_voxel_size_));
+  voxel.setInputCloud(combined);
+
+  local_map_ = std::make_shared<PointCloud>();
+  voxel.filter(*local_map_);
+
+  RCLCPP_DEBUG(this->get_logger(),
+    "Local map updated: %d keyframes, %zu points",
+    static_cast<int>(local_map_frames_.size()), local_map_->size());
 }
 
 void LidarOdometryNode::pointCloudCallback(
@@ -113,10 +263,16 @@ void LidarOdometryNode::pointCloudCallback(
     return;
   }
 
-  // First frame: store and publish identity (in vehicle frame)
+  rclcpp::Time curr_stamp(msg->header.stamp);
+
+  // First frame: initialize local map and publish identity
   if (is_first_frame_) {
     prev_cloud_ = filtered_cloud;
+    prev_stamp_ = curr_stamp;
     is_first_frame_ = false;
+
+    // Initialize local map with first frame at identity pose
+    updateLocalMap(filtered_cloud, cumulative_pose_);
 
     std::array<double, 36> zero_cov{};
     Eigen::Matrix4f cumulative_vehicle = t_vehicle_lidar_ * cumulative_pose_ * t_lidar_vehicle_;
@@ -130,25 +286,58 @@ void LidarOdometryNode::pointCloudCallback(
     return;
   }
 
-  // NDT alignment
-  ndt_.setInputTarget(prev_cloud_);
+  // Compute initial guess for NDT
+  Eigen::Matrix4f predicted_delta;
+  if (use_imu_prediction_) {
+    predicted_delta = predictFromImu(prev_stamp_, curr_stamp);
+  } else {
+    predicted_delta = prev_delta_;
+  }
+
+  // Initial guess: predicted cumulative pose (scan-to-map)
+  Eigen::Matrix4f initial_guess = cumulative_pose_ * predicted_delta;
+
+  // Set NDT target: local map (preferred) or previous cloud (fallback)
+  if (local_map_ && local_map_->size() > 100) {
+    ndt_.setInputTarget(local_map_);
+  } else {
+    // Fallback to frame-to-frame for early frames
+    ndt_.setInputTarget(prev_cloud_);
+    // For frame-to-frame, initial guess is the delta, not cumulative
+    initial_guess = predicted_delta;
+  }
   ndt_.setInputSource(filtered_cloud);
 
   auto aligned = std::make_shared<PointCloud>();
-  ndt_.align(*aligned, prev_delta_);
+  ndt_.align(*aligned, initial_guess);
 
   if (!ndt_.hasConverged()) {
     RCLCPP_WARN(this->get_logger(), "NDT did not converge");
-    // Still update prev_cloud but keep previous delta
     prev_cloud_ = filtered_cloud;
+    prev_stamp_ = curr_stamp;
     return;
   }
 
-  // Get results
-  Eigen::Matrix4f delta = ndt_.getFinalTransformation();
-  cumulative_pose_ = cumulative_pose_ * delta;
+  // Extract results
+  Eigen::Matrix4f ndt_result = ndt_.getFinalTransformation();
+  Eigen::Matrix4f delta;
+
+  if (local_map_ && local_map_->size() > 100) {
+    // Scan-to-map: NDT result is the new cumulative pose
+    delta = cumulative_pose_.inverse() * ndt_result;
+    cumulative_pose_ = ndt_result;
+  } else {
+    // Frame-to-frame fallback: NDT result is the delta
+    delta = ndt_result;
+    cumulative_pose_ = cumulative_pose_ * delta;
+  }
+
   prev_delta_ = delta;
   prev_cloud_ = filtered_cloud;
+  prev_stamp_ = curr_stamp;
+
+  // Update local map (adds keyframe if sufficient movement)
+  updateLocalMap(filtered_cloud, cumulative_pose_);
 
   // Estimate covariance
   auto covariance = estimateCovariance();
@@ -166,10 +355,11 @@ void LidarOdometryNode::pointCloudCallback(
   trans_pub_->publish(trans_msg);
 
   RCLCPP_DEBUG(this->get_logger(),
-    "NDT converged: iter=%d, prob=%.4f, dist=%.4f",
+    "NDT converged: iter=%d, prob=%.4f, dist=%.4f, map_pts=%zu",
     ndt_.getFinalNumIteration(),
     ndt_.getTransformationProbability(),
-    ndt_.getLastMeanCorrespondenceDistance());
+    ndt_.getLastMeanCorrespondenceDistance(),
+    local_map_ ? local_map_->size() : 0);
 }
 
 LidarOdometryNode::PointCloud::Ptr LidarOdometryNode::filterPointCloud(
